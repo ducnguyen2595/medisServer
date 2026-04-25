@@ -1,0 +1,44 @@
+{
+  "name": "medis-server",
+  "version": "1.0.0",
+  "description": "Audiophile-grade media server for local network streaming",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "scan": "tsx src/scanner.ts"
+  },
+  "keywords": [
+    "media-server",
+    "streaming",
+    "audiophile",
+    "flac",
+    "dsd"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "better-sqlite3": "^11.8.1",
+    "music-metadata": "^9.0.0",
+    "node-cron": "^3.0.3",
+    "cors": "^2.8.5",
+    "fluent-ffmpeg": "^2.1.2",
+    "chokidar": "^3.5.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.6",
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node-cron": "^3.0.11",
+    "@types/cors": "^2.8.17",
+    "@types/fluent-ffmpeg": "^2.1.24",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
