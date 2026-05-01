@@ -1237,6 +1237,148 @@
             transform: translateX(-50%) translateY(0);
             opacity: 1;
         }
+
+        /* Sources Tab */
+        .sources-section {
+            margin-bottom: 24px;
+        }
+
+        .sources-section h2 {
+            font-size: 1em;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+
+        .scan-folder-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .scan-folder-input {
+            flex: 1;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            padding: 12px 16px;
+            color: var(--text-primary);
+            font-size: 0.9em;
+            font-family: monospace;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .scan-folder-input::placeholder {
+            color: var(--text-subdued);
+        }
+
+        .scan-folder-input:focus {
+            border-color: var(--primary);
+        }
+
+        .scan-btn {
+            padding: 12px 20px;
+            border-radius: 12px;
+            border: none;
+            background: var(--primary);
+            color: #000;
+            font-size: 0.9em;
+            font-weight: 700;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.2s, opacity 0.2s;
+        }
+
+        .scan-btn:hover {
+            background: var(--primary-dark);
+        }
+
+        .scan-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .scan-btn-secondary {
+            background: var(--glass-bg);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+        }
+
+        .scan-btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* Bubbles Tab */
+        .bubbles-toolbar {
+            display: flex;
+            gap: 8px;
+            padding: 12px 0;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+        .bubbles-toolbar::-webkit-scrollbar { display: none; }
+
+        .facet-chip {
+            padding: 8px 14px;
+            border-radius: 20px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            color: var(--text-secondary);
+            font-size: 0.85em;
+            font-weight: 600;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .facet-chip.active {
+            background: var(--primary);
+            color: #000;
+            border-color: var(--primary);
+        }
+
+        #bubblesChart {
+            width: 100%;
+            height: calc(100vh - 280px);
+            min-height: 480px;
+            background: radial-gradient(circle at 50% 40%, rgba(29,185,84,0.06), transparent 60%), var(--bg-base);
+            border-radius: 16px;
+            border: 1px solid var(--glass-border);
+            overflow: hidden;
+            position: relative;
+        }
+
+        #bubblesChart .breadcrumbs {
+            display: flex;
+            gap: 6px;
+            font-size: 0.8em;
+            color: var(--text-secondary);
+            padding: 8px 12px;
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            z-index: 2;
+            pointer-events: none;
+        }
+        #bubblesChart .breadcrumbs span {
+            background: rgba(0,0,0,0.45);
+            padding: 4px 10px;
+            border-radius: 12px;
+            backdrop-filter: blur(8px);
+            pointer-events: auto;
+            cursor: pointer;
+        }
+
+        .bubbles-empty {
+            color: var(--text-subdued);
+            text-align: center;
+            padding: 40px 20px;
+            font-size: 0.9em;
+        }
     </style>
 </head>
 <body>
@@ -1254,9 +1396,10 @@
     <div class="tabs">
         <button class="tab active" onclick="switchTab('home', this)">Home</button>
         <button class="tab" onclick="switchTab('music', this)">Music</button>
+        <button class="tab" onclick="switchTab('bubbles', this)">Bubbles</button>
         <button class="tab" onclick="switchTab('videos', this)">Videos</button>
         <button class="tab" onclick="switchTab('search', this)">Search</button>
-        <button class="tab" onclick="switchTab('stats', this)">Stats</button>
+        <button class="tab" onclick="switchTab('sources', this)">Sources</button>
     </div>
 
     <!-- Search (shown when Search tab active) -->
@@ -1421,6 +1564,9 @@
         </div>
     </div>
 
+    <!-- circlepack-chart (POC: zoomable hierarchical bubbles) -->
+    <script src="https://unpkg.com/d3@7"></script>
+    <script src="https://unpkg.com/circlepack-chart"></script>
     <script>
         const SERVER_URL = window.location.origin;
         const API_BASE = `${SERVER_URL}/api`;
@@ -1482,13 +1628,16 @@
             } else if (tab === 'music') {
                 currentMediaType = 'audio';
                 loadLibraryContent();
+            } else if (tab === 'bubbles') {
+                currentMediaType = 'audio';
+                loadBubblesContent();
             } else if (tab === 'videos') {
                 currentMediaType = 'video';
                 loadVideosContent();
             } else if (tab === 'search') {
                 loadSearchContent();
-            } else if (tab === 'stats') {
-                loadStats();
+            } else if (tab === 'sources') {
+                loadSources();
             }
             
             updatePlaybackBar();
@@ -1755,42 +1904,341 @@
             }
         }
 
-        // Load Stats
-        async function loadStats() {
+        // ===== Bubbles Tab (POC: progressive drill-down) =====
+        let bubblesData = null;          // cached audio library
+        let bubblesChart = null;         // circlepack-chart instance
+        let bubblesFacet = 'genre';      // 'genre' | 'artist' | 'album' | 'format'
+        let bubblesPath = [];            // drill-down stack: e.g. ['Jazz', 'Miles Davis']
+
+        function bubbleFormatOf(track) {
+            const codec = (track.codec || '').toUpperCase();
+            const sr = track.sample_rate || 0;
+            const bd = track.bits_per_sample || 0;
+            if (codec === 'DSD' || codec.includes('DSD')) return 'DSD';
+            if (codec === 'FLAC' && (sr > 48000 || bd > 16)) return 'Hi-Res';
+            if (codec === 'FLAC' || codec === 'ALAC' || codec === 'WAV') return 'Lossless';
+            return 'Lossy';
+        }
+
+        // Per-facet drill levels. Each function maps a track → bucket name at that level.
+        const FACET_LEVELS = {
+            genre:  [t => (t.genre  || 'Unknown').trim()        || 'Unknown',
+                     t => (t.artist || 'Unknown Artist').trim() || 'Unknown Artist',
+                     t => (t.album  || 'Singles').trim()        || 'Singles'],
+            artist: [t => (t.artist || 'Unknown Artist').trim() || 'Unknown Artist',
+                     t => (t.album  || 'Singles').trim()        || 'Singles'],
+            album:  [t => (t.album  || 'Unknown Album').trim()  || 'Unknown Album'],
+            format: [bubbleFormatOf,
+                     t => (t.artist || 'Unknown Artist').trim() || 'Unknown Artist',
+                     t => (t.album  || 'Singles').trim()        || 'Singles'],
+        };
+        const LEVEL_LABELS = {
+            genre:  ['Genre', 'Artist', 'Album', 'Track'],
+            artist: ['Artist', 'Album', 'Track'],
+            album:  ['Album', 'Track'],
+            format: ['Format', 'Artist', 'Album', 'Track'],
+        };
+
+        async function loadBubblesContent() {
             const content = document.getElementById('content');
-            content.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading stats...</div></div>';
+            content.innerHTML = `
+                <div class="bubbles-toolbar">
+                    <button class="facet-chip active" data-facet="genre"  onclick="setBubblesFacet('genre', this)">Genre</button>
+                    <button class="facet-chip"        data-facet="artist" onclick="setBubblesFacet('artist', this)">Artist</button>
+                    <button class="facet-chip"        data-facet="album"  onclick="setBubblesFacet('album', this)">Album</button>
+                    <button class="facet-chip"        data-facet="format" onclick="setBubblesFacet('format', this)">Format</button>
+                </div>
+                <div id="bubblesChart">
+                    <div class="loading" style="padding-top: 80px;"><div class="spinner"></div><div>Loading library…</div></div>
+                </div>
+            `;
+
+            try {
+                if (!bubblesData) {
+                    const res = await fetch(`${API_BASE}/media?type=audio&limit=10000`);
+                    const json = await res.json();
+                    bubblesData = json.data || [];
+                }
+                bubblesPath = [];
+                renderBubbles();
+            } catch (err) {
+                console.error('Bubbles load failed:', err);
+                document.getElementById('bubblesChart').innerHTML =
+                    '<div class="bubbles-empty">⚠️ Failed to load library</div>';
+            }
+        }
+
+        function setBubblesFacet(facet, btn) {
+            bubblesFacet = facet;
+            bubblesPath = [];
+            document.querySelectorAll('.facet-chip').forEach(c => c.classList.remove('active'));
+            btn.classList.add('active');
+            renderBubbles();
+        }
+
+        const BUBBLE_PALETTE = {
+            'DSD':     '#c8956d',
+            'Hi-Res':  '#e0b878',
+            'Lossless':'#1db954',
+            'Lossy':   '#6a6a6a',
+            'Unknown': '#3a3a3a',
+        };
+        function colorFor(name, depth) {
+            if (BUBBLE_PALETTE[name]) return BUBBLE_PALETTE[name];
+            let h = 0;
+            for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+            const hue = h % 360;
+            const sat = 50 - depth * 8;
+            const light = 36 + depth * 5;
+            return `hsl(${hue}, ${sat}%, ${light}%)`;
+        }
+
+        // Filter tracks down to those matching the current drill path.
+        function filteredTracks() {
+            const levels = FACET_LEVELS[bubblesFacet];
+            return bubblesData.filter(t =>
+                bubblesPath.every((val, i) => levels[i](t) === val)
+            );
+        }
+
+        // Build a one-level-deep tree for the current view.
+        function buildCurrentLevel() {
+            const levels = FACET_LEVELS[bubblesFacet];
+            const tracks = filteredTracks();
+            const depth = bubblesPath.length;
+
+            // Reached the leaf level → show tracks
+            if (depth >= levels.length) {
+                return {
+                    name: bubblesPath[bubblesPath.length - 1] || 'Tracks',
+                    children: tracks.map(t => ({
+                        name: t.title || t.file_name || `#${t.id}`,
+                        value: Math.max(1, Math.round((t.duration || 60) / 30)),
+                        track: t,
+                    })),
+                };
+            }
+
+            // Group by next level
+            const buckets = new Map();
+            const keyFn = levels[depth];
+            for (const t of tracks) {
+                const k = keyFn(t);
+                if (!buckets.has(k)) buckets.set(k, 0);
+                buckets.set(k, buckets.get(k) + 1);
+            }
+
+            const rootName = bubblesPath[bubblesPath.length - 1] || (LEVEL_LABELS[bubblesFacet][0] + 's');
+            return {
+                name: rootName,
+                children: Array.from(buckets, ([name, count]) => ({
+                    name,
+                    value: count,
+                    drillable: true,
+                })),
+            };
+        }
+
+        function renderCrumbs() {
+            const labels = LEVEL_LABELS[bubblesFacet];
+            const root = labels[0] + 's';
+            const parts = [`<span data-depth="0">${root}</span>`];
+            bubblesPath.forEach((val, i) => {
+                parts.push(`<span data-depth="${i + 1}">${escapeHtml(val)}</span>`);
+            });
+            const crumbs = document.getElementById('bubblesCrumbs');
+            crumbs.innerHTML = parts.join('<span style="opacity:.4;padding:0 2px">›</span>');
+            crumbs.querySelectorAll('span[data-depth]').forEach(el => {
+                el.addEventListener('click', () => {
+                    bubblesPath = bubblesPath.slice(0, parseInt(el.dataset.depth, 10));
+                    renderBubbles();
+                });
+            });
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        function renderBubbles() {
+            const el = document.getElementById('bubblesChart');
+            if (!el || !bubblesData) return;
+            if (!window.CirclePack) {
+                el.innerHTML = '<div class="bubbles-empty">⚠️ Bubble library failed to load (CDN blocked?)</div>';
+                return;
+            }
+
+            el.innerHTML = `
+                <div class="breadcrumbs"><span id="bubblesCrumbs"></span></div>
+                <div id="bubblesMount" style="position:absolute;inset:0;"></div>
+            `;
+            renderCrumbs();
+
+            const tree = buildCurrentLevel();
+            const mount = document.getElementById('bubblesMount');
+            const depth = bubblesPath.length;
+
+            if (!tree.children || tree.children.length === 0) {
+                mount.innerHTML = '<div class="bubbles-empty">No tracks here.</div>';
+                return;
+            }
+
+            bubblesChart = CirclePack()
+                .data(tree)
+                .size('value')
+                .label(n => n.name)
+                .color(n => {
+                    if (n.track) return colorFor(n.track.album || n.name, depth + 1);
+                    return colorFor(n.name, depth);
+                })
+                .tooltipContent((n, d) => {
+                    if (n.track) {
+                        const fmt = bubbleFormatOf(n.track);
+                        const sr = n.track.sample_rate ? `${(n.track.sample_rate/1000).toFixed(1)}kHz` : '';
+                        const bd = n.track.bits_per_sample ? ` · ${n.track.bits_per_sample}-bit` : '';
+                        return `<b>${escapeHtml(n.name)}</b><br/>${escapeHtml(n.track.artist || '')}<br/><span style="opacity:.7">${fmt} · ${sr}${bd}</span>`;
+                    }
+                    const nextLabel = LEVEL_LABELS[bubblesFacet][depth + 1] || 'item';
+                    return `<b>${escapeHtml(n.name)}</b><br/><span style="opacity:.7">${d.value} ${nextLabel.toLowerCase()}${d.value === 1 ? '' : 's'}</span>`;
+                })
+                .onClick(node => {
+                    if (!node) return;          // ignore background taps; use breadcrumb to go up
+                    if (node.track) {
+                        // Leaf — play it. Playlist = all sibling tracks in this view.
+                        currentPlaylist = (tree.children || []).map(c => c.track).filter(Boolean);
+                        originalPlaylist = [...currentPlaylist];
+                        playAudio(node.track);
+                        return;
+                    }
+                    // Drill into this bucket
+                    bubblesPath = [...bubblesPath, node.name];
+                    renderBubbles();
+                })
+                (mount);
+        }
+
+        // Invalidate cache after a scan completes (cheap + correct)
+        window.addEventListener('beforeunload', () => { bubblesData = null; });
+
+        // Load Sources (stats + scan controls)
+        async function loadSources() {
+            const content = document.getElementById('content');
+            content.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading...</div></div>';
 
             try {
                 const response = await fetch(`${API_BASE}/stats`);
                 const stats = await response.json();
 
+                const lastScanText = stats.last_scan
+                    ? new Date(stats.last_scan.completed_at * 1000).toLocaleString()
+                    : 'Never';
+
                 const html = `
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-value">${stats.audio_files}</div>
-                            <div class="stat-label">Songs</div>
+                    <div class="sources-section">
+                        <h2>Library</h2>
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <div class="stat-value">${stats.audio_files}</div>
+                                <div class="stat-label">Songs</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value">${(stats.total_size_bytes / 1024 / 1024 / 1024).toFixed(1)} GB</div>
+                                <div class="stat-label">Total Size</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value">${(stats.total_duration_seconds / 3600).toFixed(0)} hrs</div>
+                                <div class="stat-label">Duration</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value">${stats.video_files}</div>
+                                <div class="stat-label">Videos</div>
+                            </div>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-value">${(stats.total_size_bytes / 1024 / 1024 / 1024).toFixed(1)} GB</div>
-                            <div class="stat-label">Total Size</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">${(stats.total_duration_seconds / 3600).toFixed(0)} hrs</div>
-                            <div class="stat-label">Duration</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">${stats.video_files}</div>
-                            <div class="stat-label">Videos</div>
+                        <div style="text-align: center; color: var(--text-subdued); font-size: 0.82em; margin-bottom: 4px;">
+                            Last scan: ${lastScanText}
                         </div>
                     </div>
-                    <div style="text-align: center; color: var(--text-subdued); margin-top: 20px;">
-                        <p>Last scan: ${new Date(stats.last_scan.completed_at * 1000).toLocaleString()}</p>
+
+                    <div class="sources-section">
+                        <h2>Scan</h2>
+                        <button class="scan-btn scan-btn-secondary" id="scanAllBtn" onclick="scanLibrary()"
+                                style="width: 100%; margin-bottom: 16px;">
+                            Rescan Full Library
+                        </button>
+                        <div class="scan-folder-row">
+                            <input class="scan-folder-input" id="scanPathInput"
+                                   type="text" placeholder="/absolute/path/to/folder"
+                                   onkeydown="if(event.key==='Enter') scanFolder()" />
+                            <button class="scan-btn" id="scanFolderBtn" onclick="scanFolder()">Scan</button>
+                        </div>
+                        <div style="color: var(--text-subdued); font-size: 0.8em; margin-top: 8px;">
+                            Enter an absolute path to add a folder to the library without changing your configured roots.
+                        </div>
                     </div>
                 `;
 
                 content.innerHTML = html;
             } catch (error) {
-                content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><div>Failed to load stats</div></div>';
+                content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><div>Failed to load sources</div></div>';
+            }
+        }
+
+        async function scanLibrary() {
+            const btn = document.getElementById('scanAllBtn');
+            if (!btn) return;
+            btn.disabled = true;
+            btn.textContent = 'Scanning…';
+            try {
+                const res = await fetch(`${API_BASE}/scan`, { method: 'POST' });
+                if (res.ok) {
+                    showToast('Full library scan started');
+                } else {
+                    const err = await res.json();
+                    showToast('Error: ' + (err.error || res.statusText));
+                }
+            } catch (e) {
+                showToast('Failed to start scan');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = 'Rescan Full Library';
+                }
+            }
+        }
+
+        async function scanFolder() {
+            const input = document.getElementById('scanPathInput');
+            const btn = document.getElementById('scanFolderBtn');
+            if (!input || !btn) return;
+
+            const folderPath = input.value.trim();
+            if (!folderPath) {
+                showToast('Enter a folder path first');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '…';
+            try {
+                const res = await fetch(`${API_BASE}/scan`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: folderPath }),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast('Scan started: ' + folderPath.split('/').pop());
+                    input.value = '';
+                } else {
+                    showToast('Error: ' + (data.error || res.statusText));
+                }
+            } catch (e) {
+                showToast('Failed to start scan');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = 'Scan';
+                }
             }
         }
 
