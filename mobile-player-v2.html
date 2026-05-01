@@ -1645,6 +1645,35 @@
         let isShuffled = false;
         let repeatMode = 'off'; // 'off', 'all', 'one'
         let originalPlaylist = []; // For shuffle/unshuffle
+        let bubbleAutoPlay = false; // After bubble playlist ends, keep playing random tracks
+        let cachedAudioTotal = null; // Cached audio file count for random picks
+
+        async function playRandomFromLibrary() {
+            try {
+                if (cachedAudioTotal == null) {
+                    const statsRes = await fetch(`${API_BASE}/stats`);
+                    const stats = await statsRes.json();
+                    cachedAudioTotal = stats.audio_files || 0;
+                }
+                if (!cachedAudioTotal) return null;
+
+                const offset = Math.floor(Math.random() * cachedAudioTotal);
+                const res = await fetch(`${API_BASE}/media?type=audio&limit=1&offset=${offset}`);
+                const json = await res.json();
+                const track = json.data && json.data[0];
+                if (!track) return null;
+
+                currentPlaylist = [track];
+                originalPlaylist = [track];
+                currentTrackIndex = 0;
+                playAudio(track);
+                showToast(`🎲 Random: ${track.title || track.file_name}`);
+                return track;
+            } catch (err) {
+                console.error('Random pick failed:', err);
+                return null;
+            }
+        }
 
         // Infinite scroll state
         let currentPage = 0;
@@ -1750,6 +1779,7 @@
                 });
 
                 currentPlaylist = [...recentData.data, ...topData.data];
+                bubbleAutoPlay = false;
                 content.innerHTML = html;
                 content.classList.add('fade-in');
             } catch (error) {
@@ -1774,6 +1804,7 @@
 
                 currentPlaylist = shuffledLibrary;
                 originalPlaylist = shuffledLibrary;
+                bubbleAutoPlay = false;
                 isShuffled = true;
 
                 // Update shuffle button states
@@ -2553,6 +2584,7 @@
                 if (node && node.payload && node.payload.__track) {
                   currentPlaylist = bubbleLeafTracks;
                   originalPlaylist = [...bubbleLeafTracks];
+                  bubbleAutoPlay = true;
                   playAudio(node.payload.__track);
                 }
               });
@@ -2885,6 +2917,7 @@
                 // No playlist loaded yet, create one with just this track
                 currentPlaylist = [track];
                 currentTrackIndex = 0;
+                bubbleAutoPlay = false;
             }
             
             audioPlayer.src = `${API_BASE}/stream/${track.id}`;
@@ -2970,6 +3003,10 @@
             if (currentTrackIndex >= currentPlaylist.length) {
                 if (repeatMode === 'all') {
                     currentTrackIndex = 0;
+                } else if (bubbleAutoPlay) {
+                    // Bubble playlist exhausted — keep playing random tracks from the library
+                    playRandomFromLibrary();
+                    return;
                 } else {
                     // End of playlist, stop playing
                     isPlaying = false;
@@ -3325,6 +3362,7 @@
                     }
 
                     currentPlaylist = shuffledLibrary;
+                    bubbleAutoPlay = false;
                     showToast(`🔀 Shuffled ${pagination.total} tracks`);
                 } catch (error) {
                     console.error('Failed to load library for shuffle:', error);
