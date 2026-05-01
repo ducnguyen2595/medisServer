@@ -3,6 +3,7 @@ import path from 'path';
 import { parseFile } from 'music-metadata';
 import { db, MediaFile, ScanHistory, initDatabase } from './database.js';
 import { config } from './config.js';
+import { rebuildBubbleIndex } from './bubbleIndex.js';
 
 interface ScanStats {
   scanned: number;
@@ -20,21 +21,60 @@ export class MediaScanner {
   };
 
   async scanAll(): Promise<ScanStats> {
-    console.log(`🔍 Starting media scan: ${config.mediaPath}`);
-    
+    console.log(`🔍 Starting media scan: ${config.mediaPaths.join(', ')}`);
+
     const scanId = this.createScanHistory();
     this.stats = { scanned: 0, added: 0, updated: 0, removed: 0 };
 
     try {
-      // Scan all media files
-      await this.scanDirectory(config.mediaPath);
-      
+      for (const root of config.mediaPaths) {
+        await this.scanDirectory(root);
+      }
+
       // Remove deleted files from database
       this.stats.removed = this.cleanupDeletedFiles();
-      
+
       this.completeScanHistory(scanId, 'completed');
       console.log(`✅ Scan complete:`, this.stats);
-      
+
+      try {
+        rebuildBubbleIndex();
+        console.log('🫧 Bubble index rebuilt');
+      } catch (err) {
+        console.error('Bubble index rebuild failed:', err);
+      }
+
+      return this.stats;
+    } catch (error) {
+      this.completeScanHistory(scanId, 'failed', error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  async scanPath(rootPath: string): Promise<ScanStats> {
+    const resolved = path.resolve(rootPath);
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory()) {
+      throw new Error(`Not a directory: ${resolved}`);
+    }
+
+    console.log(`🔍 Starting one-off scan: ${resolved}`);
+
+    const scanId = this.createScanHistory();
+    this.stats = { scanned: 0, added: 0, updated: 0, removed: 0 };
+
+    try {
+      await this.scanDirectory(resolved);
+      this.completeScanHistory(scanId, 'completed');
+      console.log(`✅ One-off scan complete:`, this.stats);
+
+      try {
+        rebuildBubbleIndex();
+        console.log('🫧 Bubble index rebuilt');
+      } catch (err) {
+        console.error('Bubble index rebuild failed:', err);
+      }
+
       return this.stats;
     } catch (error) {
       this.completeScanHistory(scanId, 'failed', error instanceof Error ? error.message : String(error));

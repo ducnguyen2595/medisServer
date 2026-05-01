@@ -4,9 +4,10 @@ import cron from 'node-cron';
 import { networkInterfaces } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { initDatabase } from './database.js';
+import { initDatabase, db } from './database.js';
 import { config } from './config.js';
 import { MediaScanner } from './scanner.js';
+import { rebuildBubbleIndex } from './bubbleIndex.js';
 import routes from './api/routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -67,6 +68,13 @@ app.get('/info', (req, res) => {
 // Initialize database
 initDatabase();
 
+// Check if bubble snapshot exists; if not, build it
+const snap = db.prepare('SELECT id FROM bubble_snapshot WHERE id = 1').get();
+if (!snap) {
+  console.log('🫧 No bubble snapshot found — building...');
+  rebuildBubbleIndex();
+}
+
 // Schedule daily scan
 console.log(`⏰ Scheduled daily scan: ${config.scanCron}`);
 cron.schedule(config.scanCron, async () => {
@@ -105,7 +113,8 @@ app.listen(config.port, config.host, () => {
   console.log('\n🎵 ═══════════════════════════════════════════════════════');
   console.log('   Medis Server - Audiophile Media Streaming');
   console.log('   ═══════════════════════════════════════════════════════');
-  console.log(`\n   📁 Media Path: ${config.mediaPath}`);
+  console.log(`\n   📁 Media Paths:`);
+  config.mediaPaths.forEach(p => console.log(`      - ${p}`));
   console.log(`   🗄️  Database: ${config.dbPath}`);
   console.log(`\n   🌐 Server running on:`);
   console.log(`      - Local:   http://localhost:${config.port}`);

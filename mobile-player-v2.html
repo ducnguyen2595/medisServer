@@ -1379,6 +1379,69 @@
             padding: 40px 20px;
             font-size: 0.9em;
         }
+
+        .bubble {
+            cursor: pointer;
+            pointer-events: all;
+        }
+
+        .bubble circle {
+            transition: r 0.2s ease;
+            opacity: 0.9;
+        }
+
+        .bubble[data-hover="true"] circle {
+            opacity: 1;
+            filter: url(#bubble-glow);
+        }
+
+        .bubble text {
+            fill: white;
+            font-weight: 600;
+            text-anchor: middle;
+            dominant-baseline: central;
+            pointer-events: none;
+            user-select: none;
+        }
+
+        .bubble.is-pulse circle {
+            animation: pulse-breath 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse-breath {
+            0%, 100% { opacity: 0.85; }
+            50% { opacity: 1.0; }
+        }
+
+        .bubble-focus-chip {
+            position: absolute;
+            left: 50%;
+            bottom: 12px;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.72);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: var(--text-primary);
+            padding: 8px 14px;
+            border-radius: 16px;
+            font-size: 0.85em;
+            font-weight: 600;
+            white-space: nowrap;
+            max-width: calc(100% - 32px);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            opacity: 0;
+            transition: opacity 0.18s ease;
+            pointer-events: none;
+            z-index: 3;
+            border: 1px solid var(--glass-border);
+        }
+        .bubble-focus-chip[data-visible="true"] { opacity: 1; }
+        .bubble-focus-chip .chip-meta {
+            color: var(--text-secondary);
+            font-weight: 400;
+            margin-left: 6px;
+        }
     </style>
 </head>
 <body>
@@ -1564,9 +1627,9 @@
         </div>
     </div>
 
-    <!-- circlepack-chart (POC: zoomable hierarchical bubbles) -->
+    <!-- d3 + GSAP for LiveBubbles rendering -->
     <script src="https://unpkg.com/d3@7"></script>
-    <script src="https://unpkg.com/circlepack-chart"></script>
+    <script src="https://unpkg.com/gsap@3.12.5/dist/gsap.min.js"></script>
     <script>
         const SERVER_URL = window.location.origin;
         const API_BASE = `${SERVER_URL}/api`;
@@ -1904,221 +1967,632 @@
             }
         }
 
-        // ===== Bubbles Tab (POC: progressive drill-down) =====
-        let bubblesData = null;          // cached audio library
-        let bubblesChart = null;         // circlepack-chart instance
-        let bubblesFacet = 'genre';      // 'genre' | 'artist' | 'album' | 'format'
-        let bubblesPath = [];            // drill-down stack: e.g. ['Jazz', 'Miles Davis']
-
-        function bubbleFormatOf(track) {
-            const codec = (track.codec || '').toUpperCase();
-            const sr = track.sample_rate || 0;
-            const bd = track.bits_per_sample || 0;
-            if (codec === 'DSD' || codec.includes('DSD')) return 'DSD';
-            if (codec === 'FLAC' && (sr > 48000 || bd > 16)) return 'Hi-Res';
-            if (codec === 'FLAC' || codec === 'ALAC' || codec === 'WAV') return 'Lossless';
-            return 'Lossy';
-        }
-
-        // Per-facet drill levels. Each function maps a track → bucket name at that level.
-        const FACET_LEVELS = {
-            genre:  [t => (t.genre  || 'Unknown').trim()        || 'Unknown',
-                     t => (t.artist || 'Unknown Artist').trim() || 'Unknown Artist',
-                     t => (t.album  || 'Singles').trim()        || 'Singles'],
-            artist: [t => (t.artist || 'Unknown Artist').trim() || 'Unknown Artist',
-                     t => (t.album  || 'Singles').trim()        || 'Singles'],
-            album:  [t => (t.album  || 'Unknown Album').trim()  || 'Unknown Album'],
-            format: [bubbleFormatOf,
-                     t => (t.artist || 'Unknown Artist').trim() || 'Unknown Artist',
-                     t => (t.album  || 'Singles').trim()        || 'Singles'],
-        };
-        const LEVEL_LABELS = {
-            genre:  ['Genre', 'Artist', 'Album', 'Track'],
-            artist: ['Artist', 'Album', 'Track'],
-            album:  ['Album', 'Track'],
-            format: ['Format', 'Artist', 'Album', 'Track'],
+        // ===== Bubbles Tab (constellation + drill-down) =====
+        const CATEGORY_COLORS = {
+          genre:  '#1db954',
+          artist: '#3ddc84',
+          decade: '#e0b878',
+          format: '#c8956d',
+          recent: '#a0a0ff',
         };
 
-        async function loadBubblesContent() {
-            const content = document.getElementById('content');
-            content.innerHTML = `
-                <div class="bubbles-toolbar">
-                    <button class="facet-chip active" data-facet="genre"  onclick="setBubblesFacet('genre', this)">Genre</button>
-                    <button class="facet-chip"        data-facet="artist" onclick="setBubblesFacet('artist', this)">Artist</button>
-                    <button class="facet-chip"        data-facet="album"  onclick="setBubblesFacet('album', this)">Album</button>
-                    <button class="facet-chip"        data-facet="format" onclick="setBubblesFacet('format', this)">Format</button>
-                </div>
-                <div id="bubblesChart">
-                    <div class="loading" style="padding-top: 80px;"><div class="spinner"></div><div>Loading library…</div></div>
-                </div>
-            `;
-
-            try {
-                if (!bubblesData) {
-                    const res = await fetch(`${API_BASE}/media?type=audio&limit=10000`);
-                    const json = await res.json();
-                    bubblesData = json.data || [];
-                }
-                bubblesPath = [];
-                renderBubbles();
-            } catch (err) {
-                console.error('Bubbles load failed:', err);
-                document.getElementById('bubblesChart').innerHTML =
-                    '<div class="bubbles-empty">⚠️ Failed to load library</div>';
-            }
-        }
-
-        function setBubblesFacet(facet, btn) {
-            bubblesFacet = facet;
-            bubblesPath = [];
-            document.querySelectorAll('.facet-chip').forEach(c => c.classList.remove('active'));
-            btn.classList.add('active');
-            renderBubbles();
-        }
-
-        const BUBBLE_PALETTE = {
-            'DSD':     '#c8956d',
-            'Hi-Res':  '#e0b878',
-            'Lossless':'#1db954',
-            'Lossy':   '#6a6a6a',
-            'Unknown': '#3a3a3a',
+        const CATEGORY_GRADIENTS = {
+          genre:   ['#2dd06a', '#1db954', '#0e6e34'],
+          artist:  ['#5be29c', '#3ddc84', '#1f7a48'],
+          decade:  ['#f0c890', '#e0b878', '#7a5d35'],
+          format:  ['#dba574', '#c8956d', '#6e4f33'],
+          recent:  ['#bcbcff', '#a0a0ff', '#4f4f8a'],
+          track:   ['#8be0a8', '#5fb87f', '#2e6b44'],
         };
-        function colorFor(name, depth) {
-            if (BUBBLE_PALETTE[name]) return BUBBLE_PALETTE[name];
-            let h = 0;
-            for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-            const hue = h % 360;
-            const sat = 50 - depth * 8;
-            const light = 36 + depth * 5;
-            return `hsl(${hue}, ${sat}%, ${light}%)`;
-        }
 
-        // Filter tracks down to those matching the current drill path.
-        function filteredTracks() {
-            const levels = FACET_LEVELS[bubblesFacet];
-            return bubblesData.filter(t =>
-                bubblesPath.every((val, i) => levels[i](t) === val)
-            );
-        }
-
-        // Build a one-level-deep tree for the current view.
-        function buildCurrentLevel() {
-            const levels = FACET_LEVELS[bubblesFacet];
-            const tracks = filteredTracks();
-            const depth = bubblesPath.length;
-
-            // Reached the leaf level → show tracks
-            if (depth >= levels.length) {
-                return {
-                    name: bubblesPath[bubblesPath.length - 1] || 'Tracks',
-                    children: tracks.map(t => ({
-                        name: t.title || t.file_name || `#${t.id}`,
-                        value: Math.max(1, Math.round((t.duration || 60) / 30)),
-                        track: t,
-                    })),
-                };
-            }
-
-            // Group by next level
-            const buckets = new Map();
-            const keyFn = levels[depth];
-            for (const t of tracks) {
-                const k = keyFn(t);
-                if (!buckets.has(k)) buckets.set(k, 0);
-                buckets.set(k, buckets.get(k) + 1);
-            }
-
-            const rootName = bubblesPath[bubblesPath.length - 1] || (LEVEL_LABELS[bubblesFacet][0] + 's');
-            return {
-                name: rootName,
-                children: Array.from(buckets, ([name, count]) => ({
-                    name,
-                    value: count,
-                    drillable: true,
-                })),
-            };
-        }
-
-        function renderCrumbs() {
-            const labels = LEVEL_LABELS[bubblesFacet];
-            const root = labels[0] + 's';
-            const parts = [`<span data-depth="0">${root}</span>`];
-            bubblesPath.forEach((val, i) => {
-                parts.push(`<span data-depth="${i + 1}">${escapeHtml(val)}</span>`);
-            });
-            const crumbs = document.getElementById('bubblesCrumbs');
-            crumbs.innerHTML = parts.join('<span style="opacity:.4;padding:0 2px">›</span>');
-            crumbs.querySelectorAll('span[data-depth]').forEach(el => {
-                el.addEventListener('click', () => {
-                    bubblesPath = bubblesPath.slice(0, parseInt(el.dataset.depth, 10));
-                    renderBubbles();
-                });
-            });
-        }
+        let bubblesChart = null;
+        let bubblesFacet = null;      // null = constellation; 'genre'|'artist'|'decade'|'format'|'recent' = drill
+        let bubblesPath = [];         // drill-down stack
+        let bubbleLeafTracks = [];    // leaf level tracks for playback
 
         function escapeHtml(s) {
-            return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+          return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
-        function renderBubbles() {
-            const el = document.getElementById('bubblesChart');
-            if (!el || !bubblesData) return;
-            if (!window.CirclePack) {
-                el.innerHTML = '<div class="bubbles-empty">⚠️ Bubble library failed to load (CDN blocked?)</div>';
-                return;
+        class LiveBubbles {
+          constructor() {
+            this.container = null;
+            this.svg = null;
+            this.rootG = null;
+            this.nodes = [];
+            this.sim = null;
+            this.width = 0;
+            this.height = 0;
+            this.onClickHandler = null;
+            this.resizeObserver = null;
+            this.resizeTimeout = null;
+            this.pulseTimelines = [];
+            this.hoverTimelines = new Map();
+          }
+
+          mount(container) {
+            if (this.svg && this.svg.parentNode === container) return;
+
+            this.container = container;
+            container.innerHTML = '';
+
+            this.width = container.clientWidth || 800;
+            this.height = container.clientHeight || 600;
+
+            this.svg = d3.create('svg')
+              .attr('width', this.width)
+              .attr('height', this.height)
+              .attr('style', 'display: block; width: 100%; height: 100%;');
+
+            const defs = this.svg.append('defs');
+            this._createGradients(defs);
+            this._createGlowFilter(defs);
+
+            this.rootG = this.svg.append('g');
+
+            container.appendChild(this.svg.node());
+
+            this.focusChip = document.createElement('div');
+            this.focusChip.className = 'bubble-focus-chip';
+            container.appendChild(this.focusChip);
+
+            this._setupResizeObserver();
+          }
+
+          _createGradients(defs) {
+            for (const [category, colors] of Object.entries(CATEGORY_GRADIENTS)) {
+              const grad = defs.append('radialGradient')
+                .attr('id', `grad-${category}`)
+                .attr('cx', '30%')
+                .attr('cy', '25%')
+                .attr('r', '70%');
+
+              grad.append('stop').attr('offset', '0%').attr('stop-color', colors[0]);
+              grad.append('stop').attr('offset', '60%').attr('stop-color', colors[1]);
+              grad.append('stop').attr('offset', '100%').attr('stop-color', colors[2]);
+            }
+          }
+
+          _createGlowFilter(defs) {
+            const filter = defs.append('filter')
+              .attr('id', 'bubble-glow')
+              .attr('x', '-50%')
+              .attr('y', '-50%')
+              .attr('width', '200%')
+              .attr('height', '200%');
+
+            filter.append('feGaussianBlur')
+              .attr('stdDeviation', '4')
+              .attr('result', 'blur');
+
+            filter.append('feFlood')
+              .attr('flood-color', '#d4a574')
+              .attr('flood-opacity', '0.6')
+              .attr('result', 'glow');
+
+            filter.append('feComposite')
+              .attr('in', 'glow')
+              .attr('in2', 'blur')
+              .attr('operator', 'in')
+              .attr('result', 'softGlow');
+
+            filter.append('feMerge')
+              .selectAll('feMergeNode')
+              .data(['softGlow', 'SourceGraphic'])
+              .enter()
+              .append('feMergeNode')
+              .attr('in', d => d);
+          }
+
+          _setupResizeObserver() {
+            if (this.resizeObserver) this.resizeObserver.disconnect();
+
+            this.resizeObserver = new ResizeObserver(() => {
+              if (this.resizeTimeout) clearTimeout(this.resizeTimeout);
+              this.resizeTimeout = setTimeout(() => {
+                this._handleResize();
+              }, 150);
+            });
+
+            if (this.container) {
+              this.resizeObserver.observe(this.container);
+            }
+          }
+
+          _handleResize() {
+            const newWidth = this.container.clientWidth || 800;
+            const newHeight = this.container.clientHeight || 600;
+
+            if (newWidth !== this.width || newHeight !== this.height) {
+              this.width = newWidth;
+              this.height = newHeight;
+
+              this.svg
+                .attr('width', newWidth)
+                .attr('height', newHeight);
+
+              if (this.nodes.length > 0) {
+                this._updateForcePositions();
+                if (this.sim) {
+                  this.sim.force('x', d3.forceX(d => d.targetX).strength(0.06));
+                  this.sim.force('y', d3.forceY(d => d.targetY).strength(0.06));
+                  this.sim.alpha(0.3).restart();
+                }
+              }
+            }
+          }
+
+          setData(nodes, opts = {}) {
+            this.nodes = nodes.map(n => ({
+              ...n,
+              id: n.id || Math.random().toString(),
+              x: this.width / 2 + (Math.random() - 0.5) * 100,
+              y: this.height / 2 + (Math.random() - 0.5) * 100,
+              targetX: 0,
+              targetY: 0,
+              r: Math.sqrt(Math.max(n.value, 1)) * 5,
+              fx: null,
+              fy: null,
+            }));
+
+            this._updateForcePositions();
+
+            if (opts.spawnFromEdge) {
+              const rad = 1.4 * Math.max(this.width, this.height);
+              const cx = this.width / 2;
+              const cy = this.height / 2;
+              this.nodes.forEach(n => {
+                const angle = Math.random() * 2 * Math.PI;
+                n.x = cx + rad * Math.cos(angle);
+                n.y = cy + rad * Math.sin(angle);
+              });
             }
 
-            el.innerHTML = `
-                <div class="breadcrumbs"><span id="bubblesCrumbs"></span></div>
-                <div id="bubblesMount" style="position:absolute;inset:0;"></div>
-            `;
-            renderCrumbs();
+            this._stopSimulation();
+            this._createSimulation();
+            this._renderBubbles();
+            this._startPulseAnimation();
+          }
 
-            const tree = buildCurrentLevel();
+          _updateForcePositions() {
+            const hierarchy = d3.hierarchy({ children: this.nodes })
+              .sum(d => Math.max(d.value, 1));
+
+            const packed = d3.pack()
+              .size([this.width, this.height])
+              .padding(2)(hierarchy);
+
+            const leaves = packed.leaves();
+            leaves.forEach(leaf => {
+              const originalNode = this.nodes.find(n => n === leaf.data);
+              if (originalNode) {
+                originalNode.targetX = leaf.x;
+                originalNode.targetY = leaf.y;
+                originalNode.r = leaf.r;
+              }
+            });
+          }
+
+          _createSimulation() {
+            this.sim = d3.forceSimulation(this.nodes)
+              .force('collide', d3.forceCollide(d => d.r + 1.5).strength(0.9))
+              .force('x', d3.forceX(d => d.targetX).strength(0.06))
+              .force('y', d3.forceY(d => d.targetY).strength(0.06))
+              .force('charge', d3.forceManyBody().strength(-4))
+              .alphaDecay(0)
+              .alphaTarget(0.04)
+              .on('tick', () => this._tick());
+          }
+
+          _tick() {
+            this.rootG.selectAll('.bubble')
+              .attr('transform', d => `translate(${d.x},${d.y})`);
+          }
+
+          _renderBubbles() {
+            const bubbles = this.rootG.selectAll('.bubble').data(this.nodes, d => d.id);
+
+            const enter = bubbles.enter().append('g')
+              .attr('class', 'bubble')
+              .attr('data-category', d => d.category || '')
+              .attr('transform', d => `translate(${d.x},${d.y})`);
+
+            enter.append('circle')
+              .attr('r', d => d.r)
+              .attr('fill', d => {
+                const cat = d.category || 'track';
+                return `url(#grad-${cat})`;
+              });
+
+            enter.append('text')
+              .attr('font-size', d => {
+                const size = Math.max(8, Math.min(d.r * 0.32, 14));
+                return `${size}px`;
+              })
+              .text(d => {
+                if (d.r > 32) return d.name;
+                if (d.r > 14) {
+                  const max = Math.max(3, Math.floor(d.r / 3));
+                  return d.name.length > max ? d.name.slice(0, max - 1) + '…' : d.name;
+                }
+                return '';
+              })
+              .style('display', d => d.r > 14 ? 'block' : 'none');
+
+            enter
+              .on('mouseenter', (e, d) => this._onBubbleHover(e, d, true))
+              .on('mouseleave', (e, d) => this._onBubbleHover(e, d, false))
+              .on('touchstart', (e, d) => this._onBubbleHover(e, d, true))
+              .on('touchend', (e, d) => this._onBubbleHover(e, d, false))
+              .on('click', (e, d) => this._onBubbleClick(e, d));
+
+            d3.select(this.svg.node()).call(d3.drag()
+              .on('start', (e, d) => {
+                if (!d) return;
+                this.sim.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+              })
+              .on('drag', (e, d) => {
+                if (!d) return;
+                d.fx = e.x;
+                d.fy = e.y;
+              })
+              .on('end', (e, d) => {
+                if (!d) return;
+                this.sim.alphaTarget(0.04);
+                d.fx = null;
+                d.fy = null;
+              }));
+
+            bubbles.exit().remove();
+
+            this.nodes.forEach((n, i) => {
+              n.elem = document.querySelector(`.bubble[data-category="${n.category || ''}"]`);
+            });
+          }
+
+          _onBubbleHover(e, d, isEnter) {
+            const g = e.currentTarget;
+            const circle = d3.select(g).select('circle');
+
+            if (this.hoverTimelines.has(d.id)) {
+              this.hoverTimelines.get(d.id).kill();
+            }
+
+            if (isEnter) {
+              g.setAttribute('data-hover', 'true');
+              const tl = gsap.timeline();
+              tl.to(circle.node(), { attr: { r: d.r * 1.08 } }, 0);
+              this.hoverTimelines.set(d.id, tl);
+
+              if (this.sim) {
+                this.sim.alphaTarget(0.15).restart();
+              }
+
+              if (this.focusChip) {
+                const count = (d.payload && d.payload.__count) || d.count || null;
+                const meta = count != null ? `<span class="chip-meta">· ${count}</span>` : '';
+                this.focusChip.innerHTML = this._escapeChip(d.name) + meta;
+                this.focusChip.setAttribute('data-visible', 'true');
+              }
+            } else {
+              g.removeAttribute('data-hover');
+              const tl = gsap.timeline();
+              tl.to(circle.node(), { attr: { r: d.r } }, 0);
+              this.hoverTimelines.set(d.id, tl);
+
+              if (this.sim) {
+                this.sim.alphaTarget(0.04);
+              }
+
+              if (this.focusChip) {
+                this.focusChip.removeAttribute('data-visible');
+              }
+            }
+          }
+
+          _escapeChip(s) {
+            return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+          }
+
+          _onBubbleClick(e, d) {
+            if (this.onClickHandler) {
+              this.onClickHandler(d);
+            }
+          }
+
+          onClick(handler) {
+            this.onClickHandler = handler;
+          }
+
+          async drillTransition(clickedNode, newNodes) {
+            const cx = this.width / 2;
+            const cy = this.height / 2;
+            const others = this.nodes.filter(n => n !== clickedNode);
+
+            if (clickedNode.elem) {
+              gsap.to(clickedNode.elem, {
+                attr: { cx: cx, cy: cy },
+                scale: 2.2,
+                opacity: 0,
+                duration: 0.45,
+                ease: 'power3.in',
+              });
+            }
+
+            gsap.to(others.map(n => n.elem).filter(Boolean), {
+              scale: 0.4,
+              opacity: 0,
+              duration: 0.4,
+              stagger: 0.004,
+            });
+
+            await new Promise(r => setTimeout(r, 450));
+
+            this.setData(newNodes, { spawnFromEdge: true });
+
+            gsap.fromTo(this.rootG.node(), { scale: 1.04 }, {
+              scale: 1.0,
+              duration: 0.6,
+              ease: 'power2.out',
+            });
+          }
+
+          async reverseTransition(newNodes) {
+            const others = this.nodes;
+
+            gsap.to(others.map(n => n.elem).filter(Boolean), {
+              scale: 0.3,
+              opacity: 0,
+              duration: 0.35,
+              stagger: 0.003,
+            });
+
+            await new Promise(r => setTimeout(r, 350));
+
+            this.setData(newNodes, { spawnFromEdge: false });
+
+            const rad = 1.4 * Math.max(this.width, this.height);
+            const cx = this.width / 2;
+            const cy = this.height / 2;
+
+            this.nodes.forEach(n => {
+              const angle = Math.random() * 2 * Math.PI;
+              n.x = cx + rad * Math.cos(angle);
+              n.y = cy + rad * Math.sin(angle);
+            });
+
+            if (this.sim) {
+              this.sim.alpha(0.5).restart();
+            }
+
+            await new Promise(r => setTimeout(r, 50));
+
+            gsap.fromTo(this.rootG.node(), { scale: 0.9 }, {
+              scale: 1.0,
+              duration: 0.5,
+              ease: 'power2.out',
+            });
+          }
+
+          _startPulseAnimation() {
+            this._clearPulses();
+
+            if (bubblesFacet === null) {
+              const categoryGroups = {};
+              this.nodes.forEach(n => {
+                if (!categoryGroups[n.category]) {
+                  categoryGroups[n.category] = [];
+                }
+                categoryGroups[n.category].push(n);
+              });
+
+              for (const [cat, nodes] of Object.entries(categoryGroups)) {
+                if (nodes.length > 0) {
+                  const largest = nodes.reduce((a, b) => a.value > b.value ? a : b);
+                  const elem = this.rootG.selectAll('.bubble').filter(d => d === largest).select('circle').node();
+                  if (elem) {
+                    const tl = gsap.timeline({ repeat: -1 });
+                    tl.to(elem, { attr: { 'fill-opacity': 0.85 } }, 0)
+                      .to(elem, { attr: { 'fill-opacity': 1.0 } }, 0.5, 0)
+                      .to(elem, { attr: { 'fill-opacity': 0.85 } }, 1.5, 0);
+                    this.pulseTimelines.push(tl);
+                  }
+                }
+              }
+            }
+          }
+
+          _clearPulses() {
+            this.pulseTimelines.forEach(tl => tl.kill());
+            this.pulseTimelines = [];
+          }
+
+          _stopSimulation() {
+            if (this.sim) {
+              this.sim.stop();
+            }
+            this._clearPulses();
+            this.hoverTimelines.forEach(tl => tl.kill());
+            this.hoverTimelines.clear();
+          }
+
+          destroy() {
+            this._stopSimulation();
+            if (this.resizeObserver) {
+              this.resizeObserver.disconnect();
+            }
+            if (this.resizeTimeout) {
+              clearTimeout(this.resizeTimeout);
+            }
+            if (this.svg && this.svg.node()) {
+              this.svg.node().remove();
+            }
+            this.svg = null;
+            this.rootG = null;
+            this.nodes = [];
+          }
+        }
+
+        function openCategoryDrill(category, bucketName) {
+          bubblesFacet = category;
+          bubblesPath = [bucketName];
+          renderBubbles();
+        }
+
+        async function loadBubblesContent() {
+          const content = document.getElementById('content');
+          content.innerHTML = '<div id="bubblesChart"><div class="loading" style="padding-top: 80px;"><div class="spinner"></div><div>Loading…</div></div></div>';
+
+          try {
+            const res = await fetch(`${API_BASE}/bubbles/top`);
+            const payload = await res.json();
+            window._lastConstellationPayload = payload;
+            renderConstellation(payload);
+          } catch (err) {
+            console.error('Bubbles load failed:', err);
+            document.getElementById('bubblesChart').innerHTML = '<div class="bubbles-empty">⚠️ Failed to load bubbles</div>';
+          }
+        }
+
+        function renderConstellation(payload) {
+          const el = document.getElementById('bubblesChart');
+          bubblesFacet = null;
+          bubblesPath = [];
+
+          const allBubbles = [];
+          for (const facet of (payload.facets || [])) {
+            for (const bucket of (facet.buckets || [])) {
+              allBubbles.push({
+                id: `${facet.key}-${bucket.name}`,
+                name: bucket.name,
+                value: Math.sqrt(bucket.count),
+                category: facet.key,
+                isLeaf: false,
+                payload: {
+                  __category: facet.key,
+                  __count: bucket.count,
+                },
+              });
+            }
+          }
+
+          el.innerHTML = '<div id="bubblesMount" style="position:absolute;inset:0;"></div><div id="bubblesLegend" style="position:absolute;bottom:12px;left:12px;display:flex;gap:6px;flex-wrap:wrap;z-index:2;"></div>';
+
+          const mount = document.getElementById('bubblesMount');
+          const legend = document.getElementById('bubblesLegend');
+
+          legend.innerHTML = Object.entries(CATEGORY_COLORS)
+            .map(([cat, col]) => `<div style="display:flex;align-items:center;gap:4px;font-size:0.75em;color:rgba(255,255,255,0.7);"><div style="width:10px;height:10px;background:${col};border-radius:50%;"></div><span>${cat}</span></div>`)
+            .join('');
+
+          if (!bubblesChart) {
+            bubblesChart = new LiveBubbles();
+          }
+
+          bubblesChart.mount(mount);
+          bubblesChart.setData(allBubbles);
+          bubblesChart.onClick(node => {
+            if (node && node.payload && node.payload.__category) {
+              openCategoryDrill(node.payload.__category, node.name);
+            }
+          });
+        }
+
+        async function renderBubbles() {
+          const el = document.getElementById('bubblesChart');
+          if (!el || !bubblesFacet) return;
+
+          el.innerHTML = '<div class="breadcrumbs"><span id="bubblesCrumbs"></span></div><div id="bubblesMount" style="position:absolute;inset:0;"></div>';
+
+          const path = bubblesPath;
+          const crumbs = document.getElementById('bubblesCrumbs');
+          const parts = ['<span onclick="bubblesPath = []; await renderConstellation(window._lastConstellationPayload);" style="cursor:pointer;">All</span>'];
+          path.forEach((val, i) => {
+            parts.push(`<span onclick="bubblesPath = bubblesPath.slice(0, ${i}); renderBubbles();" style="cursor:pointer;">${escapeHtml(val)}</span>`);
+          });
+          crumbs.innerHTML = parts.join('<span style="opacity:.4;padding:0 2px">›</span>');
+          crumbs.querySelectorAll('span').forEach(el => {
+            el.style.background = 'rgba(0,0,0,0.45)';
+            el.style.padding = '4px 10px';
+            el.style.borderRadius = '12px';
+            el.style.backdropFilter = 'blur(8px)';
+          });
+
+          try {
+            const pathJson = JSON.stringify(path);
+            const res = await fetch(`${API_BASE}/bubbles/drill?facet=${encodeURIComponent(bubblesFacet)}&path=${encodeURIComponent(pathJson)}`);
+            const result = await res.json();
+
             const mount = document.getElementById('bubblesMount');
-            const depth = bubblesPath.length;
 
-            if (!tree.children || tree.children.length === 0) {
+            if (result.atLeaf) {
+              bubbleLeafTracks = result.leafTracks || [];
+              const bubbles = bubbleLeafTracks.map(t => ({
+                id: `track-${t.id}`,
+                name: t.title || t.file_name || `#${t.id}`,
+                value: Math.max(1, Math.round((t.duration || 60) / 30)),
+                category: bubblesFacet,
+                isLeaf: true,
+                payload: { __track: t },
+              }));
+
+              if (bubbles.length === 0) {
                 mount.innerHTML = '<div class="bubbles-empty">No tracks here.</div>';
                 return;
+              }
+
+              if (!bubblesChart) {
+                bubblesChart = new LiveBubbles();
+              }
+
+              bubblesChart.mount(mount);
+              bubblesChart.setData(bubbles);
+              bubblesChart.onClick(node => {
+                if (node && node.payload && node.payload.__track) {
+                  currentPlaylist = bubbleLeafTracks;
+                  originalPlaylist = [...bubbleLeafTracks];
+                  playAudio(node.payload.__track);
+                }
+              });
+            } else {
+              const buckets = result.buckets || [];
+              if (buckets.length === 0) {
+                mount.innerHTML = '<div class="bubbles-empty">No items here.</div>';
+                return;
+              }
+
+              const bubbles = buckets.map(b => ({
+                id: `bucket-${b.name}`,
+                name: b.name,
+                value: Math.sqrt(b.count),
+                category: bubblesFacet,
+                isLeaf: false,
+                payload: { __count: b.count },
+              }));
+
+              if (!bubblesChart) {
+                bubblesChart = new LiveBubbles();
+              }
+
+              bubblesChart.mount(mount);
+              bubblesChart.setData(bubbles);
+              bubblesChart.onClick(node => {
+                if (node) {
+                  bubblesPath = [...bubblesPath, node.name];
+                  renderBubbles();
+                }
+              });
             }
-
-            bubblesChart = CirclePack()
-                .data(tree)
-                .size('value')
-                .label(n => n.name)
-                .color(n => {
-                    if (n.track) return colorFor(n.track.album || n.name, depth + 1);
-                    return colorFor(n.name, depth);
-                })
-                .tooltipContent((n, d) => {
-                    if (n.track) {
-                        const fmt = bubbleFormatOf(n.track);
-                        const sr = n.track.sample_rate ? `${(n.track.sample_rate/1000).toFixed(1)}kHz` : '';
-                        const bd = n.track.bits_per_sample ? ` · ${n.track.bits_per_sample}-bit` : '';
-                        return `<b>${escapeHtml(n.name)}</b><br/>${escapeHtml(n.track.artist || '')}<br/><span style="opacity:.7">${fmt} · ${sr}${bd}</span>`;
-                    }
-                    const nextLabel = LEVEL_LABELS[bubblesFacet][depth + 1] || 'item';
-                    return `<b>${escapeHtml(n.name)}</b><br/><span style="opacity:.7">${d.value} ${nextLabel.toLowerCase()}${d.value === 1 ? '' : 's'}</span>`;
-                })
-                .onClick(node => {
-                    if (!node) return;          // ignore background taps; use breadcrumb to go up
-                    if (node.track) {
-                        // Leaf — play it. Playlist = all sibling tracks in this view.
-                        currentPlaylist = (tree.children || []).map(c => c.track).filter(Boolean);
-                        originalPlaylist = [...currentPlaylist];
-                        playAudio(node.track);
-                        return;
-                    }
-                    // Drill into this bucket
-                    bubblesPath = [...bubblesPath, node.name];
-                    renderBubbles();
-                })
-                (mount);
+          } catch (err) {
+            console.error('Drill failed:', err);
+            const mount = document.getElementById('bubblesMount');
+            if (mount) {
+              mount.innerHTML = '<div class="bubbles-empty">⚠️ Drill failed</div>';
+            }
+          }
         }
-
-        // Invalidate cache after a scan completes (cheap + correct)
-        window.addEventListener('beforeunload', () => { bubblesData = null; });
 
         // Load Sources (stats + scan controls)
         async function loadSources() {

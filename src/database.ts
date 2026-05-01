@@ -118,6 +118,13 @@ export function initDatabase() {
       status TEXT DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed')),
       error TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS bubble_snapshot (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      payload TEXT NOT NULL,
+      track_count INTEGER NOT NULL,
+      built_at INTEGER NOT NULL
+    );
   `);
   
   // Rebuild FTS index for existing data

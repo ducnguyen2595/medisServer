@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { db } from '../database.js';
 import { streamMedia, getMediaInfo } from '../streaming.js';
 import { getThumbnail } from '../thumbnail.js';
+import { rebuildBubbleIndex, drillBuckets } from '../bubbleIndex.js';
 import fs from 'fs';
+import path from 'path';
 
 const router = Router();
 
@@ -640,15 +642,76 @@ router.get('/stats', (req, res) => {
   }
 });
 
-// Trigger manual scan
+// Bubble snapshots: top-level facet aggregations
+router.get('/bubbles/top', (req, res) => {
+  try {
+    const row = db.prepare('SELECT payload, track_count, built_at FROM bubble_snapshot WHERE id = 1').get() as any;
+    if (!row) return res.json({ facets: [], track_count: 0, built_at: null });
+    const parsed = JSON.parse(row.payload);
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ ...parsed, track_count: row.track_count, built_at: row.built_at });
+  } catch (err) {
+    console.error('bubbles/top error:', err);
+    res.status(500).json({ error: 'Failed to fetch bubble snapshot' });
+  }
+});
+
+// Drill down into a facet's buckets
+router.get('/bubbles/drill', (req, res) => {
+  const { facet, path } = req.query;
+  if (typeof facet !== 'string') return res.status(400).json({ error: 'facet required' });
+  let parsedPath: string[] = [];
+  try {
+    parsedPath = path ? JSON.parse(path as string) : [];
+  } catch {
+    return res.status(400).json({ error: 'invalid path JSON' });
+  }
+  try {
+    const result = drillBuckets(facet, parsedPath);
+    res.json(result);
+  } catch (err: any) {
+    console.error('bubbles/drill error:', err);
+    res.status(500).json({ error: 'Drill query failed' });
+  }
+});
+
+// Rebuild bubble index
+router.post('/bubbles/rebuild', (req, res) => {
+  try {
+    rebuildBubbleIndex();
+    res.json({ status: 'ok' });
+  } catch (err: any) {
+    console.error('rebuild failed:', err);
+    res.status(500).json({ error: 'Rebuild failed' });
+  }
+});
+
+// Trigger manual scan. Optional body: { "path": "/abs/dir" } to scan a single
+// folder once (added to the library but not included in the daily schedule).
 router.post('/scan', async (req, res) => {
   try {
-    // Import scanner dynamically to avoid circular dependencies
+    const requestedPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
+
+    if (requestedPath) {
+      if (!path.isAbsolute(requestedPath)) {
+        return res.status(400).json({ error: 'path must be absolute' });
+      }
+      let stat;
+      try {
+        stat = fs.statSync(requestedPath);
+      } catch {
+        return res.status(400).json({ error: `path does not exist: ${requestedPath}` });
+      }
+      if (!stat.isDirectory()) {
+        return res.status(400).json({ error: `path is not a directory: ${requestedPath}` });
+      }
+    }
+
     const { MediaScanner } = await import('../scanner.js');
     const scanner = new MediaScanner();
-    
-    // Run scan in background
-    scanner.scanAll()
+
+    const run = requestedPath ? scanner.scanPath(requestedPath) : scanner.scanAll();
+    run
       .then(stats => {
         console.log('✅ Manual scan completed:', stats);
       })
@@ -656,7 +719,11 @@ router.post('/scan', async (req, res) => {
         console.error('❌ Manual scan failed:', error);
       });
 
-    res.json({ message: 'Scan started', status: 'running' });
+    res.json({
+      message: 'Scan started',
+      status: 'running',
+      scope: requestedPath ? { type: 'path', path: requestedPath } : { type: 'all' },
+    });
   } catch (error) {
     console.error('Error starting scan:', error);
     res.status(500).json({ error: 'Failed to start scan' });

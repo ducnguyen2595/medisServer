@@ -5,8 +5,15 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const rawMediaPath = process.env.MEDIA_PATH || path.join(os.homedir(), 'Downloads');
+const mediaPaths = rawMediaPath
+  .split(':')
+  .map(p => p.trim())
+  .filter(p => p.length > 0)
+  .map(p => path.resolve(p));
+
 export const config = {
-  mediaPath: process.env.MEDIA_PATH || path.join(os.homedir(), 'Downloads'),
+  mediaPaths,
   port: parseInt(process.env.PORT || '3000', 10),
   host: process.env.HOST || '0.0.0.0',
   scanCron: process.env.SCAN_CRON || '0 3 * * *', // 3 AM daily
