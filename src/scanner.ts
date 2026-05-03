@@ -3,7 +3,7 @@ import path from 'path';
 import { parseFile } from 'music-metadata';
 import { db, MediaFile, ScanHistory, initDatabase } from './database.js';
 import { config } from './config.js';
-import { rebuildBubbleIndex } from './bubbleIndex.js';
+import { rebuildBubbleIndex, rebuildBubbleGraphSnapshot } from './bubbleIndex.js';
 
 interface ScanStats {
   scanned: number;
@@ -44,6 +44,13 @@ export class MediaScanner {
         console.error('Bubble index rebuild failed:', err);
       }
 
+      try {
+        rebuildBubbleGraphSnapshot();
+        console.log('📊 Graph snapshot rebuilt');
+      } catch (err) {
+        console.error('Graph snapshot rebuild failed:', err);
+      }
+
       return this.stats;
     } catch (error) {
       this.completeScanHistory(scanId, 'failed', error instanceof Error ? error.message : String(error));
@@ -73,6 +80,13 @@ export class MediaScanner {
         console.log('🫧 Bubble index rebuilt');
       } catch (err) {
         console.error('Bubble index rebuild failed:', err);
+      }
+
+      try {
+        rebuildBubbleGraphSnapshot();
+        console.log('📊 Graph snapshot rebuilt');
+      } catch (err) {
+        console.error('Graph snapshot rebuild failed:', err);
       }
 
       return this.stats;

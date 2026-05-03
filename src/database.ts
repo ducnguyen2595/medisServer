@@ -125,6 +125,26 @@ export function initDatabase() {
       track_count INTEGER NOT NULL,
       built_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS bubble_graph_snapshot (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      payload TEXT NOT NULL,
+      node_count INTEGER NOT NULL,
+      edge_count INTEGER NOT NULL,
+      built_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS play_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      media_file_id INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      seconds_listened INTEGER NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (media_file_id) REFERENCES media_files(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_play_events_media ON play_events(media_file_id);
+    CREATE INDEX IF NOT EXISTS idx_play_events_started ON play_events(started_at);
   `);
   
   // Rebuild FTS index for existing data

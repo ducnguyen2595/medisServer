@@ -15,6 +15,25 @@ interface BubbleSnapshot {
   facets: Facet[];
 }
 
+// Graph types
+interface GraphNode {
+  id: string;
+  type: 'artist' | 'album' | 'genre';
+  label: string;
+  value: number;
+  artist?: string; // for album nodes
+}
+
+interface GraphLink {
+  source: string;
+  target: string;
+}
+
+interface GraphPayload {
+  nodes: GraphNode[];
+  links: GraphLink[];
+}
+
 const FACET_LEVELS = {
   genre: [
     { field: 'genre', fallback: 'Unknown' },
@@ -329,4 +348,174 @@ function buildFilters(
   }
 
   return filters;
+}
+
+// Build artist-album-genre graph with cap rules
+function buildArtistAlbumGenreGraph(): GraphPayload {
+  const nodes: GraphNode[] = [];
+  const links: GraphLink[] = [];
+  const nodeMap = new Map<string, GraphNode>();
+
+  // Build genres (no threshold, will cap at 20 later)
+  const genreRows = db
+    .prepare(
+      "SELECT genre AS name, COUNT(*) AS count FROM media_files WHERE media_type='audio' AND genre IS NOT NULL AND TRIM(genre) != '' GROUP BY genre ORDER BY count DESC"
+    )
+    .all() as Array<{ name: string; count: number }>;
+
+  // Cap at 20 genres; remainder goes to "Other"
+  const MAX_GENRES = 20;
+  let otherGenreCount = 0;
+  const useGenres = genreRows.slice(0, MAX_GENRES);
+  if (genreRows.length > MAX_GENRES) {
+    otherGenreCount = genreRows.slice(MAX_GENRES).reduce((sum, g) => sum + g.count, 0);
+  }
+
+  for (const g of useGenres) {
+    const id = `g:${g.name}`;
+    const node: GraphNode = { id, type: 'genre', label: g.name, value: g.count };
+    nodeMap.set(id, node);
+    nodes.push(node);
+  }
+
+  if (otherGenreCount > 0) {
+    const id = 'g:Other';
+    const node: GraphNode = { id, type: 'genre', label: 'Other', value: otherGenreCount };
+    nodeMap.set(id, node);
+    nodes.push(node);
+  }
+
+  // Build artists (with >= 2 track threshold)
+  const artistRows = db
+    .prepare(
+      "SELECT artist AS name, COUNT(*) AS count FROM media_files WHERE media_type='audio' AND artist IS NOT NULL AND TRIM(artist) != '' GROUP BY artist HAVING count >= 2 ORDER BY count DESC"
+    )
+    .all() as Array<{ name: string; count: number }>;
+
+  const artistMap = new Map<string, number>();
+  for (const a of artistRows) {
+    artistMap.set(a.name, a.count);
+    const id = `a:${a.name}`;
+    const node: GraphNode = { id, type: 'artist', label: a.name, value: a.count };
+    nodeMap.set(id, node);
+    nodes.push(node);
+  }
+
+  // Build albums (with >= 2 track threshold per artist)
+  const albumRows = db
+    .prepare(
+      `SELECT album AS name, COALESCE(album_artist, artist) AS artist, COUNT(*) AS count
+       FROM media_files
+       WHERE media_type='audio' AND album IS NOT NULL AND TRIM(album) != ''
+       GROUP BY album, COALESCE(album_artist, artist)
+       HAVING count >= 2
+       ORDER BY count DESC`
+    )
+    .all() as Array<{ name: string; artist: string; count: number }>;
+
+  for (const al of albumRows) {
+    const id = `al:${al.name}|${al.artist}`;
+    const node: GraphNode = { id, type: 'album', label: al.name, value: al.count, artist: al.artist };
+    nodeMap.set(id, node);
+    nodes.push(node);
+  }
+
+  // Cap total nodes at 800 by raising artist threshold
+  let MAX_NODES = 800;
+  while (nodes.length > MAX_NODES && artistRows.length > 0) {
+    // Raise the artist threshold and rebuild
+    const minArtistCount = Math.min(...artistRows.map(a => a.count)) + 1;
+    const filteredArtists = artistRows.filter(a => a.count >= minArtistCount);
+
+    if (filteredArtists.length === 0) break;
+
+    // Rebuild nodes
+    nodes.length = 0;
+    nodeMap.clear();
+
+    // Re-add genres
+    for (const g of useGenres) {
+      const id = `g:${g.name}`;
+      const node: GraphNode = { id, type: 'genre', label: g.name, value: g.count };
+      nodeMap.set(id, node);
+      nodes.push(node);
+    }
+    if (otherGenreCount > 0) {
+      const id = 'g:Other';
+      const node: GraphNode = { id, type: 'genre', label: 'Other', value: otherGenreCount };
+      nodeMap.set(id, node);
+      nodes.push(node);
+    }
+
+    // Re-add filtered artists
+    for (const a of filteredArtists) {
+      const id = `a:${a.name}`;
+      const node: GraphNode = { id, type: 'artist', label: a.name, value: a.count };
+      nodeMap.set(id, node);
+      nodes.push(node);
+    }
+
+    // Re-add filtered albums
+    for (const al of albumRows) {
+      if (filteredArtists.some(a => a.name === al.artist)) {
+        const id = `al:${al.name}|${al.artist}`;
+        const node: GraphNode = { id, type: 'album', label: al.name, value: al.count, artist: al.artist };
+        nodeMap.set(id, node);
+        nodes.push(node);
+      }
+    }
+  }
+
+  // Build edges: album -> artist
+  for (const al of albumRows) {
+    const albumId = `al:${al.name}|${al.artist}`;
+    const artistId = `a:${al.artist}`;
+    if (nodeMap.has(albumId) && nodeMap.has(artistId)) {
+      links.push({ source: albumId, target: artistId });
+    }
+  }
+
+  // Build edges: artist -> genre
+  const artistGenreMap = new Map<string, Set<string>>();
+  const allTracks = db
+    .prepare(
+      "SELECT artist, COALESCE(album_artist, artist) AS genre_artist, genre FROM media_files WHERE media_type='audio' AND artist IS NOT NULL AND genre IS NOT NULL"
+    )
+    .all() as Array<{ artist: string; genre_artist: string; genre: string }>;
+
+  for (const track of allTracks) {
+    const artist = track.artist;
+    if (!artistGenreMap.has(artist)) {
+      artistGenreMap.set(artist, new Set());
+    }
+    let genre = track.genre;
+    // Map to "Other" if genre was collapsed
+    if (!useGenres.some(g => g.name === genre) && genre !== 'Other') {
+      genre = otherGenreCount > 0 ? 'Other' : genre;
+    }
+    artistGenreMap.get(artist)!.add(genre);
+  }
+
+  for (const [artist, genres] of artistGenreMap.entries()) {
+    const artistId = `a:${artist}`;
+    if (!nodeMap.has(artistId)) continue;
+
+    for (const genre of genres) {
+      const genreId = `g:${genre}`;
+      if (nodeMap.has(genreId)) {
+        links.push({ source: artistId, target: genreId });
+      }
+    }
+  }
+
+  return { nodes, links };
+}
+
+export function rebuildBubbleGraphSnapshot(): void {
+  const payload = buildArtistAlbumGenreGraph();
+  const builtAt = Math.floor(Date.now() / 1000);
+
+  db.prepare(
+    'INSERT OR REPLACE INTO bubble_graph_snapshot (id, payload, node_count, edge_count, built_at) VALUES (1, ?, ?, ?, ?)'
+  ).run(JSON.stringify(payload), payload.nodes.length, payload.links.length, builtAt);
 }

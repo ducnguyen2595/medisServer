@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db } from '../database.js';
 import { streamMedia, getMediaInfo } from '../streaming.js';
 import { getThumbnail } from '../thumbnail.js';
-import { rebuildBubbleIndex, drillBuckets } from '../bubbleIndex.js';
+import { rebuildBubbleIndex, drillBuckets, rebuildBubbleGraphSnapshot } from '../bubbleIndex.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -683,6 +683,132 @@ router.post('/bubbles/rebuild', (req, res) => {
   } catch (err: any) {
     console.error('rebuild failed:', err);
     res.status(500).json({ error: 'Rebuild failed' });
+  }
+});
+
+// Get graph snapshot
+router.get('/bubbles/graph', (req, res) => {
+  try {
+    const row = db.prepare('SELECT payload, node_count, edge_count, built_at FROM bubble_graph_snapshot WHERE id = 1').get() as any;
+    if (!row) return res.status(404).json({ error: 'Graph snapshot not built' });
+    const parsed = JSON.parse(row.payload);
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ ...parsed, nodeCount: row.node_count, edgeCount: row.edge_count, builtAt: row.built_at });
+  } catch (err) {
+    console.error('bubbles/graph error:', err);
+    res.status(500).json({ error: 'Failed to fetch graph snapshot' });
+  }
+});
+
+// Rebuild graph snapshot
+router.post('/bubbles/graph/rebuild', (req, res) => {
+  try {
+    rebuildBubbleGraphSnapshot();
+    res.json({ status: 'ok' });
+  } catch (err: any) {
+    console.error('graph rebuild failed:', err);
+    res.status(500).json({ error: 'Graph rebuild failed' });
+  }
+});
+
+// Record a play event for a track
+router.post('/track/:id/played', (req, res) => {
+  const { id } = req.params;
+  const { started_at, seconds_listened, completed } = req.body;
+
+  if (typeof seconds_listened !== 'number' || seconds_listened < 0) {
+    return res.status(400).json({ error: 'seconds_listened must be a non-negative number' });
+  }
+
+  try {
+    const media = db.prepare('SELECT id FROM media_files WHERE id = ?').get(id);
+    if (!media) return res.status(404).json({ error: 'Media file not found' });
+
+    db.prepare(`
+      INSERT INTO play_events (media_file_id, started_at, seconds_listened, completed)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      parseInt(id, 10),
+      started_at ?? Math.floor(Date.now() / 1000),
+      Math.floor(seconds_listened),
+      completed ? 1 : 0
+    );
+
+    res.json({ status: 'ok' });
+  } catch (error) {
+    console.error('Error recording play event:', error);
+    res.status(500).json({ error: 'Failed to record play event' });
+  }
+});
+
+// Get listening stats
+router.get('/stats/listening', (req, res) => {
+  const { limit = '20', period } = req.query;
+  const lim = parseInt(limit as string, 10);
+
+  let sinceClause = '';
+  const sinceParams: any[] = [];
+  if (period && typeof period === 'string') {
+    const days = parseInt(period, 10);
+    if (!isNaN(days) && days > 0) {
+      sinceClause = 'AND pe.started_at >= ?';
+      sinceParams.push(Math.floor(Date.now() / 1000) - days * 86400);
+    }
+  }
+
+  try {
+    const topTracks = db.prepare(`
+      SELECT
+        m.id, m.title, m.artist, m.album, m.duration,
+        COUNT(pe.id) AS play_count,
+        SUM(pe.seconds_listened) AS total_seconds,
+        MAX(pe.started_at) AS last_played
+      FROM play_events pe
+      JOIN media_files m ON m.id = pe.media_file_id
+      WHERE 1=1 ${sinceClause}
+      GROUP BY pe.media_file_id
+      ORDER BY play_count DESC, total_seconds DESC
+      LIMIT ?
+    `).all(...sinceParams, lim);
+
+    const topArtists = db.prepare(`
+      SELECT
+        m.artist,
+        COUNT(pe.id) AS play_count,
+        SUM(pe.seconds_listened) AS total_seconds
+      FROM play_events pe
+      JOIN media_files m ON m.id = pe.media_file_id
+      WHERE m.artist IS NOT NULL ${sinceClause}
+      GROUP BY m.artist
+      ORDER BY total_seconds DESC
+      LIMIT ?
+    `).all(...sinceParams, lim);
+
+    const totals = db.prepare(`
+      SELECT COUNT(*) AS total_plays, SUM(seconds_listened) AS total_seconds
+      FROM play_events pe
+      WHERE 1=1 ${sinceClause}
+    `).get(...sinceParams) as { total_plays: number; total_seconds: number };
+
+    const recent = db.prepare(`
+      SELECT pe.id, pe.started_at, pe.seconds_listened, pe.completed,
+             m.id AS media_id, m.title, m.artist, m.album
+      FROM play_events pe
+      JOIN media_files m ON m.id = pe.media_file_id
+      ORDER BY pe.started_at DESC
+      LIMIT ?
+    `).all(lim);
+
+    res.json({
+      top_tracks: topTracks,
+      top_artists: topArtists,
+      total_plays: totals.total_plays,
+      total_seconds: totals.total_seconds ?? 0,
+      recent,
+    });
+  } catch (error) {
+    console.error('Error fetching listening stats:', error);
+    res.status(500).json({ error: 'Failed to fetch listening stats' });
   }
 });
 
